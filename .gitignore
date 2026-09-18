@@ -229,3 +229,4 @@ qr.png
 
 # Go build output
 *.exe
+.claude
