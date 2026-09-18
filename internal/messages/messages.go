@@ -6,6 +6,7 @@ package messages
 
 import (
 	"context"
+	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -30,11 +31,18 @@ func EnsureTable(ctx context.Context, pool *pgxpool.Pool) error {
 			sender_jid TEXT NOT NULL,
 			from_me    BOOLEAN NOT NULL,
 			text       TEXT NOT NULL,
+			processed  BOOLEAN NOT NULL DEFAULT false,
 			"timestamp" TIMESTAMPTZ NOT NULL,
 			received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
+		-- Runs before anything below that references processed, so a table
+		-- created before this column existed gets it added first.
+		ALTER TABLE agent_messages
+			ADD COLUMN IF NOT EXISTS processed BOOLEAN NOT NULL DEFAULT false;
 		CREATE INDEX IF NOT EXISTS agent_messages_chat_jid_id_idx
 			ON agent_messages (chat_jid, id);
+		CREATE INDEX IF NOT EXISTS agent_messages_unprocessed_idx
+			ON agent_messages (chat_jid, id) WHERE NOT processed;
 	`)
 	return err
 }
@@ -85,6 +93,18 @@ func ExtractText(msg *waE2E.Message) string {
 	}
 }
 
+// youTubeLinkPattern matches youtube.com/watch, youtu.be, and youtube.com/shorts
+// URLs, with or without a scheme (WhatsApp text often omits "https://").
+// www./m. subdomains and query strings/fragments after the match are left
+// alone — this only needs to find the link, not validate or canonicalize it.
+var youTubeLinkPattern = regexp.MustCompile(`(?i)\bhttps?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|shorts/)[\w-]+|youtu\.be/[\w-]+)\S*`)
+
+// ExtractYouTubeLinks returns every YouTube URL found in text, in the order
+// they appear. Returns nil if none are found.
+func ExtractYouTubeLinks(text string) []string {
+	return youTubeLinkPattern.FindAllString(text, -1)
+}
+
 // Record inserts one message. Called from the whatsmeow event handler, so it
 // must not block long or panic — a failed insert is logged and dropped rather
 // than crashing the connection.
@@ -106,6 +126,7 @@ type Message struct {
 	SenderJID  string    `json:"sender_jid"`
 	FromMe     bool      `json:"from_me"`
 	Text       string    `json:"text"`
+	Processed  bool      `json:"processed"`
 	Timestamp  time.Time `json:"timestamp"`
 	ReceivedAt time.Time `json:"received_at"`
 }
@@ -122,12 +143,12 @@ func (s *Store) List(ctx context.Context, chat string, since int64, limit int) (
 	var err error
 	if chat != "" {
 		rows, err = s.pool.Query(ctx, `
-			SELECT id, chat_jid, sender_jid, from_me, text, "timestamp", received_at
+			SELECT id, chat_jid, sender_jid, from_me, text, processed, "timestamp", received_at
 			FROM agent_messages WHERE chat_jid = $1 AND id > $2
 			ORDER BY id ASC LIMIT $3`, chat, since, limit)
 	} else {
 		rows, err = s.pool.Query(ctx, `
-			SELECT id, chat_jid, sender_jid, from_me, text, "timestamp", received_at
+			SELECT id, chat_jid, sender_jid, from_me, text, processed, "timestamp", received_at
 			FROM agent_messages WHERE id > $1
 			ORDER BY id ASC LIMIT $2`, since, limit)
 	}
@@ -139,7 +160,7 @@ func (s *Store) List(ctx context.Context, chat string, since int64, limit int) (
 	out := []Message{}
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ChatJID, &m.SenderJID, &m.FromMe, &m.Text, &m.Timestamp, &m.ReceivedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChatJID, &m.SenderJID, &m.FromMe, &m.Text, &m.Processed, &m.Timestamp, &m.ReceivedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -148,4 +169,45 @@ func (s *Store) List(ctx context.Context, chat string, since int64, limit int) (
 		return nil, err
 	}
 	return out, nil
+}
+
+// ListUnprocessed returns up to limit unprocessed messages for chatJID,
+// oldest first — the scheduler's per-run scan window. "Unprocessed" is a
+// flag on the message itself (see the processed column doc comment on
+// EnsureTable), not a per-chat cursor, so it is unaffected by the message
+// being read through any other means (e.g. GET /messages).
+func (s *Store) ListUnprocessed(ctx context.Context, chatJID string, limit int) ([]Message, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, chat_jid, sender_jid, from_me, text, processed, "timestamp", received_at
+		FROM agent_messages WHERE chat_jid = $1 AND NOT processed
+		ORDER BY id ASC LIMIT $2`, chatJID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []Message{}
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.ChatJID, &m.SenderJID, &m.FromMe, &m.Text, &m.Processed, &m.Timestamp, &m.ReceivedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MarkProcessed sets processed = true for every message in ids. Called
+// after the scheduler has scanned a batch, whether or not any of them
+// contained a YouTube link, so they are never rescanned.
+func (s *Store) MarkProcessed(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE agent_messages SET processed = true WHERE id = ANY($1)`, ids)
+	return err
 }

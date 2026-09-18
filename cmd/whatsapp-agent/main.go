@@ -16,6 +16,10 @@
 //	WA_S3_USE_SSL     optional, "true" to use HTTPS
 //	WA_API_ADDR       optional, listen address for the message API, defaults
 //	                  to ":8081". Unauthenticated — see server.New.
+//	WA_SCHEDULER_INTERVAL
+//	                  optional, Go duration (e.g. "5m", "30s") between
+//	                  scheduler runs over registered chats, defaults to "5m".
+//	                  Can also be triggered on demand via POST /scheduler/run.
 //
 // The process keeps no state on disk, so it runs unprivileged in a container
 // with a read-only filesystem. Running more than one instance against the same
@@ -44,6 +48,8 @@ import (
 	"github.com/sivashankar/whatsapp_agent/internal/datastore"
 	"github.com/sivashankar/whatsapp_agent/internal/messages"
 	"github.com/sivashankar/whatsapp_agent/internal/minio"
+	"github.com/sivashankar/whatsapp_agent/internal/registrations"
+	"github.com/sivashankar/whatsapp_agent/internal/scheduler"
 	"github.com/sivashankar/whatsapp_agent/internal/server"
 	"github.com/sivashankar/whatsapp_agent/internal/whatsapp"
 )
@@ -91,6 +97,15 @@ func main() {
 	}
 	chatStore := chats.NewStore(pool)
 
+	if err := registrations.EnsureTable(ctx, pool); err != nil {
+		logger.Errorf("create registrations table: %v", err)
+		os.Exit(1)
+	}
+	regStore := registrations.NewStore(pool)
+
+	sched := scheduler.New(regStore, msgStore, logger, cfg.SchedulerInterval)
+	go sched.Run(ctx)
+
 	// A nil-ID device means nothing has been paired yet; whatsmeow fills it in
 	// once a QR scan succeeds.
 	deviceStore, err := container.GetFirstDevice(ctx)
@@ -102,7 +117,7 @@ func main() {
 	client := whatsmeow.NewClient(deviceStore, waLog.Stdout("Client", "INFO", true))
 	client.AddEventHandler(func(evt any) { whatsapp.HandleEvent(ctx, client, logger, msgStore, chatStore, evt) })
 
-	httpSrv := &http.Server{Addr: cfg.APIAddr, Handler: server.New(msgStore, chatStore)}
+	httpSrv := &http.Server{Addr: cfg.APIAddr, Handler: server.New(msgStore, chatStore, regStore, sched)}
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Errorf("http server: %v", err)

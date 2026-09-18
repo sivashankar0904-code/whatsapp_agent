@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -22,6 +23,10 @@ type Config struct {
 
 	// APIAddr is the listen address for the read-only message API.
 	APIAddr string
+
+	// SchedulerInterval is how often the scheduler runs its job over every
+	// registered chat_jid.
+	SchedulerInterval time.Duration
 }
 
 // Load reads Config from the environment.
@@ -61,6 +66,15 @@ func Load() (Config, error) {
 		apiAddr = ":8081"
 	}
 
+	schedulerInterval := 5 * time.Minute
+	if v := os.Getenv("WA_SCHEDULER_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("WA_SCHEDULER_INTERVAL: invalid duration %q: %w", v, err)
+		}
+		schedulerInterval = d
+	}
+
 	return Config{
 		DB: datastore.Config{
 			Host:     required["DB_HOST"],
@@ -70,7 +84,8 @@ func Load() (Config, error) {
 			DBName:   required["DB_NAME"],
 			SSLMode:  sslMode,
 		},
-		S3:      minio.LoadConfig(),
-		APIAddr: apiAddr,
+		S3:                minio.LoadConfig(),
+		APIAddr:           apiAddr,
+		SchedulerInterval: schedulerInterval,
 	}, nil
 }

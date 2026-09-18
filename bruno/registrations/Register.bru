@@ -1,0 +1,17 @@
+meta {
+  name: Register
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/registrations
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "chat_jid": "{{chatJid}}"
+  }
+}
