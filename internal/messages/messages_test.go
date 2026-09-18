@@ -1,4 +1,4 @@
-package main
+package messages
 
 import (
 	"testing"
@@ -57,8 +57,8 @@ func TestExtractText(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := extractText(c.msg); got != c.want {
-				t.Errorf("extractText() = %q, want %q", got, c.want)
+			if got := ExtractText(c.msg); got != c.want {
+				t.Errorf("ExtractText() = %q, want %q", got, c.want)
 			}
 		})
 	}

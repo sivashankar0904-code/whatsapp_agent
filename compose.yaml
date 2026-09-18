@@ -12,10 +12,11 @@ services:
     environment:
       # .env has DB_HOST/WA_S3_ENDPOINT pointed at 127.0.0.1, which is only
       # reachable from the host, not from inside this container. Override both
-      # to the docker network service names; env_file values above are
-      # replaced by same-key entries here.
-      DB_HOST: postgres
-      WA_S3_ENDPOINT: minio:9000
+      # to the docker network service names, read from the _DOCKER-suffixed
+      # variables in .env; these entries replace the plain-named ones the
+      # env_file above already loaded.
+      DB_HOST: ${DB_HOST_DOCKER}
+      WA_S3_ENDPOINT: ${WA_S3_ENDPOINT_DOCKER}
     # The process keeps no state on disk; all of it lives in Postgres.
     read_only: true
     cap_drop: [ALL]

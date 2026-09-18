@@ -12,7 +12,7 @@ COPY . .
 # scratch. -trimpath and -s -w drop build paths and debug symbols.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/wa .
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/wa ./cmd/whatsapp-agent
 
 # Certificates are the only runtime dependency: the agent makes TLS connections
 # to WhatsApp, and to S3 when it is configured for HTTPS.

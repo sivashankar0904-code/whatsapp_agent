@@ -1,29 +1,28 @@
-// Message persistence and the read API. whatsmeow's own tables hold session
-// and crypto state, not message content — see the schema comment on
-// ensureMessagesTable — so this is a second, independent table in the same
-// database, populated as messages arrive and served over a small HTTP API.
-package main
+// Package messages persists inbound WhatsApp messages. whatsmeow's own
+// tables hold session and crypto state, not message content — see the
+// schema comment on EnsureTable — so this is a second, independent table in
+// the same database, populated as messages arrive.
+package messages
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
-	"net/http"
-	"strconv"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-// ensureMessagesTable creates the inbound message log if it does not already
-// exist. It lives in the same database as the whatsmeow_* tables but is not
-// one of them — whatsmeow owns and migrates those, so this uses its own name
-// and its own lightweight migration to avoid any collision with a future
+// EnsureTable creates the inbound message log if it does not already exist.
+// It lives in the same database as the whatsmeow_* tables but is not one of
+// them — whatsmeow owns and migrates those, so this uses its own name and
+// its own lightweight migration to avoid any collision with a future
 // whatsmeow schema change.
-func ensureMessagesTable(ctx context.Context, db *sql.DB) error {
-	_, err := db.ExecContext(ctx, `
+func EnsureTable(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS agent_messages (
 			id         BIGSERIAL PRIMARY KEY,
 			chat_jid   TEXT NOT NULL,
@@ -39,13 +38,18 @@ func ensureMessagesTable(ctx context.Context, db *sql.DB) error {
 	return err
 }
 
-// messageStore writes inbound messages and serves them back over HTTP.
-type messageStore struct {
-	db     *sql.DB
+// Store writes inbound messages and serves them back over HTTP.
+type Store struct {
+	pool   *pgxpool.Pool
 	logger waLog.Logger
 }
 
-// extractText pulls a readable body out of a WhatsApp message.
+// NewStore returns a Store backed by pool.
+func NewStore(pool *pgxpool.Pool, logger waLog.Logger) *Store {
+	return &Store{pool: pool, logger: logger}
+}
+
+// ExtractText pulls a readable body out of a WhatsApp message.
 //
 // waE2E.Message is a tagged union of ~50 possible payloads (protobuf field
 // numbers 1 through 76+), not just plain text — reading only Conversation
@@ -59,7 +63,7 @@ type messageStore struct {
 // whatsmeow does the same unwrap internally in processProtocolParts before its
 // own protocol handling, but events.Message is not unwrapped for handlers, so
 // every case below must be checked on the unwrapped message.
-func extractText(msg *waE2E.Message) string {
+func ExtractText(msg *waE2E.Message) string {
 	if inner := msg.GetDeviceSentMessage().GetMessage(); inner != nil {
 		msg = inner
 	}
@@ -80,12 +84,12 @@ func extractText(msg *waE2E.Message) string {
 	}
 }
 
-// record inserts one message. Called from the whatsmeow event handler, so it
+// Record inserts one message. Called from the whatsmeow event handler, so it
 // must not block long or panic — a failed insert is logged and dropped rather
 // than crashing the connection.
-func (s *messageStore) record(ctx context.Context, evt *events.Message) {
-	text := extractText(evt.Message)
-	_, err := s.db.ExecContext(ctx, `
+func (s *Store) Record(ctx context.Context, evt *events.Message) {
+	text := ExtractText(evt.Message)
+	_, err := s.pool.Exec(ctx, `
 		INSERT INTO agent_messages (chat_jid, sender_jid, from_me, text, "timestamp")
 		VALUES ($1, $2, $3, $4, $5)`,
 		evt.Info.Chat.String(), evt.Info.Sender.String(), evt.Info.IsFromMe, text, evt.Info.Timestamp)
@@ -94,8 +98,8 @@ func (s *messageStore) record(ctx context.Context, evt *events.Message) {
 	}
 }
 
-// storedMessage is the JSON shape returned by the API.
-type storedMessage struct {
+// Message is the JSON shape returned by the API.
+type Message struct {
 	ID         int64     `json:"id"`
 	ChatJID    string    `json:"chat_jid"`
 	SenderJID  string    `json:"sender_jid"`
@@ -105,83 +109,42 @@ type storedMessage struct {
 	ReceivedAt time.Time `json:"received_at"`
 }
 
-// handleList serves GET /messages.
+// List returns stored messages, oldest first, matching a chat's natural
+// reading order.
 //
-// Query parameters:
-//
-//	chat   filter to one chat JID (e.g. 9199...@s.whatsapp.net or ...@g.us)
-//	since  return only rows with id > since, for polling without duplicates
-//	limit  max rows to return, default 50, capped at 500
-//
-// Rows come back oldest-first, matching a chat's natural reading order.
-func (s *messageStore) handleList(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-
-	limit := 50
-	if v := q.Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n <= 0 {
-			http.Error(w, `"limit" must be a positive integer`, http.StatusBadRequest)
-			return
-		}
-		limit = min(n, 500)
-	}
-
-	since := int64(0)
-	if v := q.Get("since"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			http.Error(w, `"since" must be an integer message id`, http.StatusBadRequest)
-			return
-		}
-		since = n
-	}
-
-	var rows *sql.Rows
+//   - chat  filter to one chat JID (e.g. 9199...@s.whatsapp.net or ...@g.us);
+//     empty means no filter
+//   - since return only rows with id > since, for polling without duplicates
+//   - limit max rows to return
+func (s *Store) List(ctx context.Context, chat string, since int64, limit int) ([]Message, error) {
+	var rows pgx.Rows
 	var err error
-	if chat := q.Get("chat"); chat != "" {
-		rows, err = s.db.QueryContext(r.Context(), `
+	if chat != "" {
+		rows, err = s.pool.Query(ctx, `
 			SELECT id, chat_jid, sender_jid, from_me, text, "timestamp", received_at
 			FROM agent_messages WHERE chat_jid = $1 AND id > $2
 			ORDER BY id ASC LIMIT $3`, chat, since, limit)
 	} else {
-		rows, err = s.db.QueryContext(r.Context(), `
+		rows, err = s.pool.Query(ctx, `
 			SELECT id, chat_jid, sender_jid, from_me, text, "timestamp", received_at
 			FROM agent_messages WHERE id > $1
 			ORDER BY id ASC LIMIT $2`, since, limit)
 	}
 	if err != nil {
-		s.logger.Errorf("query messages: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return nil, err
 	}
 	defer rows.Close()
 
-	out := []storedMessage{}
+	out := []Message{}
 	for rows.Next() {
-		var m storedMessage
+		var m Message
 		if err := rows.Scan(&m.ID, &m.ChatJID, &m.SenderJID, &m.FromMe, &m.Text, &m.Timestamp, &m.ReceivedAt); err != nil {
-			s.logger.Errorf("scan message: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
+			return nil, err
 		}
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
-		s.logger.Errorf("iterate messages: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return nil, err
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(out); err != nil {
-		s.logger.Errorf("encode response: %v", err)
-	}
-}
-
-// handleHealth serves GET /health — a plain liveness check that does not touch
-// the database, for a container orchestrator's health probe.
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	return out, nil
 }
