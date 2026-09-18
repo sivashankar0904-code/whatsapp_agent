@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local runtime files. The session store lives in Postgres now, but qr.png is
+# a live pairing code and session.db* may linger from the old SQLite store —
+# both grant access to the linked WhatsApp account.
+session.db
+session.db-*
+session.db?*
+wa.lock
+qr.png
+.env
+
+# Go build output
+*.exe
