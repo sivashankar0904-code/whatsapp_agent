@@ -39,6 +39,7 @@ import (
 	// compiler. The app's own tables use pgxpool instead — see datastore.
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/sivashankar/whatsapp_agent/internal/chats"
 	"github.com/sivashankar/whatsapp_agent/internal/config"
 	"github.com/sivashankar/whatsapp_agent/internal/datastore"
 	"github.com/sivashankar/whatsapp_agent/internal/messages"
@@ -84,6 +85,12 @@ func main() {
 	}
 	msgStore := messages.NewStore(pool, logger)
 
+	if err := chats.EnsureTable(ctx, pool); err != nil {
+		logger.Errorf("create chats table: %v", err)
+		os.Exit(1)
+	}
+	chatStore := chats.NewStore(pool)
+
 	// A nil-ID device means nothing has been paired yet; whatsmeow fills it in
 	// once a QR scan succeeds.
 	deviceStore, err := container.GetFirstDevice(ctx)
@@ -93,9 +100,9 @@ func main() {
 	}
 
 	client := whatsmeow.NewClient(deviceStore, waLog.Stdout("Client", "INFO", true))
-	client.AddEventHandler(func(evt any) { whatsapp.HandleEvent(ctx, logger, msgStore, evt) })
+	client.AddEventHandler(func(evt any) { whatsapp.HandleEvent(ctx, logger, msgStore, chatStore, evt) })
 
-	httpSrv := &http.Server{Addr: cfg.APIAddr, Handler: server.New(msgStore)}
+	httpSrv := &http.Server{Addr: cfg.APIAddr, Handler: server.New(msgStore, chatStore)}
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Errorf("http server: %v", err)

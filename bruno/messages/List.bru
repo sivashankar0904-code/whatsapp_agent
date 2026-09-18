@@ -1,0 +1,17 @@
+meta {
+  name: List
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/messages?chat=&since=&limit=50
+  body: none
+  auth: none
+}
+
+params:query {
+  chat:
+  since:
+  limit: 50
+}

@@ -6,6 +6,10 @@ services:
     deploy:
       replicas: 1
     restart: unless-stopped
+    # Published to the host like the other services in this stack (postgres,
+    # redis, minio), so the read-only API can be hit directly, e.g. from Bruno.
+    ports:
+      - "8081:8081"
     # Reads the same .env the binary uses when run directly on the host, so
     # there is one place for these values instead of two naming conventions.
     env_file: .env

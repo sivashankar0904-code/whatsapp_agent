@@ -1,0 +1,21 @@
+meta {
+  name: Get By Name
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/chats/by-name/:name
+  body: none
+  auth: none
+}
+
+params:path {
+  name: Family Group
+}
+
+script:post-response {
+  if (res.status === 200) {
+    bru.setVar("chatJid", res.body.chat_jid);
+  }
+}

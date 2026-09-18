@@ -1,0 +1,28 @@
+meta {
+  name: Upsert
+  type: http
+  seq: 4
+}
+
+put {
+  url: {{baseUrl}}/chats/:jid
+  body: json
+  auth: none
+}
+
+params:path {
+  jid: {{chatJid}}
+}
+
+body:json {
+  {
+    "display_name": "Family Group",
+    "is_group": true
+  }
+}
+
+script:post-response {
+  if (res.status === 200) {
+    bru.setVar("chatJid", res.body.chat_jid);
+  }
+}

@@ -20,7 +20,8 @@ import (
 // It lives in the same database as the whatsmeow_* tables but is not one of
 // them — whatsmeow owns and migrates those, so this uses its own name and
 // its own lightweight migration to avoid any collision with a future
-// whatsmeow schema change.
+// whatsmeow schema change. Mirrored in schemas/01_agent_messages.sql —
+// keep both in sync.
 func EnsureTable(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS agent_messages (
