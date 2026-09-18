@@ -4,10 +4,12 @@ package whatsapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
@@ -70,9 +72,10 @@ func Pair(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, qr
 }
 
 // HandleEvent is the whatsmeow event handler: it logs inbound messages and
-// records them to msgStore, upserts the sending chat into chatStore, and
-// logs connection lifecycle events.
-func HandleEvent(ctx context.Context, logger waLog.Logger, msgStore *messages.Store, chatStore *chats.Store, evt any) {
+// records them to msgStore, upserts the sending chat into chatStore
+// (fetching the group's name on first sight), and logs connection lifecycle
+// events.
+func HandleEvent(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, msgStore *messages.Store, chatStore *chats.Store, evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
 		// messages.ExtractText is the single place that knows how to pull a
@@ -81,16 +84,37 @@ func HandleEvent(ctx context.Context, logger waLog.Logger, msgStore *messages.St
 		logger.Infof("message chat=%s sender=%s fromMe=%v text=%q",
 			v.Info.Chat, v.Info.Sender, v.Info.IsFromMe, messages.ExtractText(v.Message))
 		msgStore.Record(ctx, v)
-
-		// The message event carries IsGroup but never a display name, so
-		// this only ever updates is_group; display_name is left for an
-		// explicit Upsert (e.g. a future group-info sync) to fill in.
-		if _, err := chatStore.Upsert(ctx, v.Info.Chat.String(), "", v.Info.IsGroup); err != nil {
-			logger.Warnf("upsert chat: %v", err)
-		}
+		syncChat(ctx, client, logger, chatStore, v.Info.Chat, v.Info.IsGroup)
 	case *events.Connected:
 		logger.Infof("connected to WhatsApp")
 	case *events.LoggedOut:
 		logger.Warnf("logged out (%s) — clear the whatsmeow_device row and restart to pair again", v.Reason)
+	}
+}
+
+// syncChat upserts chatJID into chatStore. Message events never carry a
+// group's name, so on first sight of a group chat (no stored row yet, or a
+// row with no display_name) this additionally fetches the name once via
+// GetGroupInfo and stores it — after that, later messages from the same
+// group see a non-nil DisplayName and skip the extra API call.
+func syncChat(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, chatStore *chats.Store, chatJID types.JID, isGroup bool) {
+	name := ""
+	if isGroup {
+		existing, err := chatStore.Get(ctx, chatJID.String())
+		if err != nil && !errors.Is(err, chats.ErrNotFound) {
+			logger.Warnf("look up chat: %v", err)
+		}
+		if existing.DisplayName == nil {
+			info, err := client.GetGroupInfo(ctx, chatJID)
+			if err != nil {
+				logger.Warnf("fetch group info for %s: %v", chatJID, err)
+			} else {
+				name = info.Name
+			}
+		}
+	}
+
+	if _, err := chatStore.Upsert(ctx, chatJID.String(), name, isGroup); err != nil {
+		logger.Warnf("upsert chat: %v", err)
 	}
 }

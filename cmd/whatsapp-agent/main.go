@@ -100,7 +100,7 @@ func main() {
 	}
 
 	client := whatsmeow.NewClient(deviceStore, waLog.Stdout("Client", "INFO", true))
-	client.AddEventHandler(func(evt any) { whatsapp.HandleEvent(ctx, logger, msgStore, chatStore, evt) })
+	client.AddEventHandler(func(evt any) { whatsapp.HandleEvent(ctx, client, logger, msgStore, chatStore, evt) })
 
 	httpSrv := &http.Server{Addr: cfg.APIAddr, Handler: server.New(msgStore, chatStore)}
 	go func() {
